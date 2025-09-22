@@ -1,11 +1,13 @@
 from dotenv import load_dotenv
 import logging
+import redis
 import os
 from typing import List, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 from system import HeroWinrateSystem
+from redis_helper import RedisHelper
 
 
 logging.basicConfig(
@@ -18,11 +20,20 @@ dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
 
+redis_client = redis.Redis(
+    host=os.getenv('REDIS_HOST', 'localhost'),
+    port=int(os.getenv('REDIS_PORT', '6379')),
+    db=int(os.getenv('REDIS_DB', '0')),
+    decode_responses=True
+)
+
+
 class TelegramBot:
     def __init__(self, token: str):
         self.token = token
         self.winrate_system = HeroWinrateSystem()
         self.user_sessions = {}  # Хранит состояние пользователей
+        self.redis_helper = RedisHelper(redis_client)
 
     def create_application(self):
         """Создает приложение бота"""
@@ -33,6 +44,7 @@ class TelegramBot:
         application.add_handler(CommandHandler("help", self.help_command))
         application.add_handler(CommandHandler("heroes", self.list_heroes))
         application.add_handler(CommandHandler("clear", self.clear_session))
+        application.add_handler(CommandHandler("ban", self.ban_command))
 
         # Обработчики сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -84,7 +96,7 @@ class TelegramBot:
 **Особенности:**
 • Поиск работает по частичному совпадению имен
 • Регистр не важен
-• Для поиска например T. Rex достаточно ввести t.
+• Для поиска например `T. Rex` достаточно ввести `t`.
         """
 
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -108,6 +120,37 @@ class TelegramBot:
         user_id = update.effective_user.id
         self.user_sessions[user_id] = {'enemy_team': []}
         await update.message.reply_text("✅ Сессия очищена. Можете вводить новую команду противника.")
+
+    def _build_ban_keyboard(self, user_id: int, page: int = 0, page_size: int = 20) -> InlineKeyboardMarkup:
+        """Строит пагинированную клавиатуру со всеми героями и статусом бана"""
+        heroes = self.winrate_system.hero_names
+        total = len(heroes)
+        start = page * page_size
+        end = min(start + page_size, total)
+        page_heroes = heroes[start:end]
+
+        rows = []
+        for hero in page_heroes:
+            banned = self.redis_helper.is_character_banned(user_id, hero)
+            mark = "✅" if banned else "⬜"
+            rows.append([InlineKeyboardButton(f"{mark} {hero}", callback_data=f"toggleban_{hero}_{page}")])
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️", callback_data=f"banpage_{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1}/{(total + page_size - 1)//page_size}", callback_data="noop"))
+        if end < total:
+            nav.append(InlineKeyboardButton("➡️", callback_data=f"banpage_{page+1}"))
+        rows.append(nav)
+
+        rows.append([InlineKeyboardButton("Закрыть", callback_data="close_ban")])
+        return InlineKeyboardMarkup(rows)
+
+    async def ban_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показывает список всех героев с чек-боксами бана"""
+        user_id = update.effective_user.id
+        keyboard = self._build_ban_keyboard(user_id=user_id, page=0)
+        await update.message.reply_text("Выберите героев для бана (нажимайте, чтобы переключить):", reply_markup=keyboard)
 
     def parse_hero_input(self, text: str) -> Tuple[List[str], List[str]]:
         """Парсит ввод пользователя и находит персонажей"""
@@ -152,26 +195,23 @@ class TelegramBot:
             await update.message.reply_text(error_text)
             return
 
-        # Обновляем команду противника
         self.user_sessions[user_id]['enemy_team'] = found_heroes
-
-        # Формируем ответ
         response = f"🎯 **Команда противника:** {', '.join(found_heroes)}\n\n"
 
         if not_found:
             response += f"⚠️ Не найдены: {', '.join(not_found)}\n\n"
 
-        # Получаем лучших контр-персонажей
-        best_counters = self.winrate_system.find_best_heroes(found_heroes, top_n=10)
+        # Получаем контр-пик с учетом бан-листа пользователя
+        banned_heroes = self.redis_helper.get_bans_list(user_id)
+        best_counters = self.winrate_system.find_best_heroes(found_heroes, top_n=10, exclude_heroes=banned_heroes)
 
         if not best_counters:
             response += "❌ Не удалось найти подходящих персонажей."
             await update.message.reply_text(response, parse_mode='Markdown')
             return
 
-        response += "🏆 **Топ-10 лучших контр-персонажей:**\n\n"
+        response += "🏆 **Топ-10 лучших контр-пиков:**\n\n"
 
-        # Создаем кнопки для детальной информации
         keyboard = []
         for i, (hero, winrate) in enumerate(best_counters, 1):
             response += f"{i:2d}. **{hero}** - {winrate:.1%}\n"
@@ -210,19 +250,22 @@ class TelegramBot:
                 emoji = "🟢" if winrate > 0.6 else "🟡" if winrate > 0.4 else "🔴"
                 detail_text += f"{emoji} vs {enemy}: {winrate:.1%} игр: {games}\n"
 
-            # Кнопка возврата
-            back_keyboard = [[InlineKeyboardButton("← Назад к списку", callback_data="back_to_list")]]
-            reply_markup = InlineKeyboardMarkup(back_keyboard)
+            # Кнопки: добавить в бан, показать/очистить баны, назад
+            detail_keyboard = [
+                [InlineKeyboardButton("🚫 Добавить в бан", callback_data=f"ban_{hero}")],
+                [InlineKeyboardButton("← Назад к списку", callback_data="back_to_list")]
+            ]
+            reply_markup = InlineKeyboardMarkup(detail_keyboard)
 
             await query.edit_message_text(detail_text, parse_mode='Markdown', reply_markup=reply_markup)
 
         elif query.data == "back_to_list":
-            # Возвращаемся к списку
             enemy_team = self.user_sessions[user_id]['enemy_team']
-            best_counters = self.winrate_system.find_best_heroes(enemy_team, top_n=10)
+            banned_heroes = self.redis_helper.get_bans_list(user_id)
+            best_counters = self.winrate_system.find_best_heroes(enemy_team, top_n=10, exclude_heroes=banned_heroes)
 
             response = f"🎯 **Команда противника:** {', '.join(enemy_team)}\n\n"
-            response += "🏆 **Топ-10 лучших контр-персонажей:**\n\n"
+            response += "🏆 **Топ-10 лучших контр-пиков:**\n\n"
 
             keyboard = []
             for i, (hero, winrate) in enumerate(best_counters, 1):
@@ -234,6 +277,47 @@ class TelegramBot:
 
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(response, parse_mode='Markdown', reply_markup=reply_markup)
+
+        elif query.data.startswith("ban_"):
+            hero = query.data.replace("ban_", "")
+            # Добавляем героя в баны пользователя
+            new_len = self.redis_helper.add_character_to_bans_list(user_id, hero)
+            await query.answer(text=f"Добавлен в баны: {hero} (всего: {new_len})", show_alert=False)
+
+        elif query.data == "show_bans":
+            bans = self.redis_helper.get_bans_list(user_id)
+            if bans:
+                text = "Ваш список банов:\n\n" + "\n".join(f"• {name}" for name in bans)
+            else:
+                text = "Ваш список банов пуст."
+
+            # Показываем отдельным сообщением, не ломая текущий экран
+            await query.message.reply_text(text)
+
+        elif query.data == "clear_bans":
+            self.redis_helper.clear_bans_list(user_id)
+            await query.answer(text="Список банов очищен", show_alert=False)
+
+        elif query.data.startswith("toggleban_"):
+            # toggleban_<Hero>_<page>
+            _, hero, page_str = query.data.split("_", 2)
+            page = int(page_str)
+            if self.redis_helper.is_character_banned(user_id, hero):
+                self.redis_helper.remove_character_from_bans_list(user_id, hero)
+            else:
+                self.redis_helper.add_character_to_bans_list(user_id, hero)
+
+            # Перестраиваем клавиатуру текущей страницы
+            keyboard = self._build_ban_keyboard(user_id=user_id, page=page)
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+
+        elif query.data.startswith("banpage_"):
+            page = int(query.data.split("_", 1)[1])
+            keyboard = self._build_ban_keyboard(user_id=user_id, page=page)
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+
+        elif query.data == "close_ban":
+            await query.edit_message_text("Меню банов закрыто")
 
 
 def main():

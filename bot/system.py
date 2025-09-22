@@ -31,11 +31,17 @@ class HeroWinrateSystem:
             return 0.0
 
         total_winrate = 0.0
+        counted = 0
         for enemy in enemy_team:
             if enemy in self.winrates[hero]:
-                total_winrate += self.winrates[hero][enemy]['percent']
+                games = self.winrates[hero][enemy]['games']
+                if games >= 10:
+                    total_winrate += self.winrates[hero][enemy]['percent']
+                    counted += 1
 
-        return total_winrate / len(enemy_team)
+        if counted == 0:
+            return 0.0
+        return total_winrate / counted
 
     def find_best_heroes(self, enemy_team: List[str], top_n: int = 10,
                              exclude_heroes: List[str] = None) -> List[Tuple[str, float]]:
@@ -76,28 +82,31 @@ class HeroWinrateSystem:
         }
 
         total_winrate = 0.0
-        best_wr = 0.0
-        worst_wr = 1.0
+        counted = 0
+        best_wr = -1.0
+        worst_wr = 2.0
 
         for enemy in enemy_team:
             if enemy in self.winrates[hero]:
-                details['matchups'][enemy] = {}
                 winrate = self.winrates[hero][enemy]['percent']
                 games = self.winrates[hero][enemy]['games']
-                details['matchups'][enemy]['winrate'] = winrate
-                details['matchups'][enemy]['games'] = games
-                total_winrate += winrate
+                if games >= 10:
+                    details['matchups'][enemy] = {}
+                    details['matchups'][enemy]['winrate'] = winrate
+                    details['matchups'][enemy]['games'] = games
+                    total_winrate += winrate
+                    counted += 1
 
-                if winrate > best_wr:
-                    best_wr = winrate
-                    details['best_matchup'] = (enemy, winrate)
+                    if winrate > best_wr:
+                        best_wr = winrate
+                        details['best_matchup'] = (enemy, winrate)
 
-                if winrate < worst_wr:
-                    worst_wr = winrate
-                    details['worst_matchup'] = (enemy, winrate)
+                    if winrate < worst_wr:
+                        worst_wr = winrate
+                        details['worst_matchup'] = (enemy, winrate)
 
-        if enemy_team:
-            details['average_winrate'] = total_winrate / len(enemy_team)
+        if counted > 0:
+            details['average_winrate'] = total_winrate / counted
 
         return details
 
