@@ -80,13 +80,14 @@ class TelegramBot:
 
 **Команды:**
 • `/start` - Начать работу с ботом
+• `/ban` - Список банов
 • `/help` - Показать эту справку
 • `/heroes` - Показать список всех персонажей
 • `/clear` - Очистить текущую сессию
 
 **Использование:**
 1. Напишите имена персонажей противника через запятую
-2. Бот найдет и покажет топ-10 лучших контр-персонажей
+2. Бот найдет и покажет топ-10 лучших контр-пиков
 3. Нажмите на персонажа для подробной информации
 
 **Примеры запросов:**
@@ -94,6 +95,8 @@ class TelegramBot:
 • `ach cir robi` (можно без запятых и частично)
 
 **Особенности:**
+• В подборке не участвуют персонажи с кол-вом игр меньше 10
+• В подборке не участвуют забаненные персонажи
 • Поиск работает по частичному совпадению имен
 • Регистр не важен
 • Для поиска например `T. Rex` достаточно ввести `t`.
@@ -132,7 +135,7 @@ class TelegramBot:
         rows = []
         for hero in page_heroes:
             banned = self.redis_helper.is_character_banned(user_id, hero)
-            mark = "✅" if banned else "⬜"
+            mark = "🚫" if banned else "✅"
             rows.append([InlineKeyboardButton(f"{mark} {hero}", callback_data=f"toggleban_{hero}_{page}")])
 
         nav = []
@@ -150,7 +153,7 @@ class TelegramBot:
         """Показывает список всех героев с чек-боксами бана"""
         user_id = update.effective_user.id
         keyboard = self._build_ban_keyboard(user_id=user_id, page=0)
-        await update.message.reply_text("Выберите героев для бана (нажимайте, чтобы переключить):", reply_markup=keyboard)
+        await update.message.reply_text("Выберите героев для бана (забаненные герои помечены 🚫):", reply_markup=keyboard)
 
     def parse_hero_input(self, text: str) -> Tuple[List[str], List[str]]:
         """Парсит ввод пользователя и находит персонажей"""
@@ -180,11 +183,9 @@ class TelegramBot:
         user_id = update.effective_user.id
         text = update.message.text
 
-        # Инициализируем сессию если её нет
         if user_id not in self.user_sessions:
             self.user_sessions[user_id] = {'enemy_team': []}
 
-        # Парсим ввод
         found_heroes, not_found = self.parse_hero_input(text)
 
         if not found_heroes:
@@ -201,7 +202,6 @@ class TelegramBot:
         if not_found:
             response += f"⚠️ Не найдены: {', '.join(not_found)}\n\n"
 
-        # Получаем контр-пик с учетом бан-листа пользователя
         banned_heroes = self.redis_helper.get_bans_list(user_id)
         best_counters = self.winrate_system.find_best_heroes(found_heroes, top_n=10, exclude_heroes=banned_heroes)
 
@@ -250,7 +250,6 @@ class TelegramBot:
                 emoji = "🟢" if winrate > 0.6 else "🟡" if winrate > 0.4 else "🔴"
                 detail_text += f"{emoji} vs {enemy}: {winrate:.1%} игр: {games}\n"
 
-            # Кнопки: добавить в бан, показать/очистить баны, назад
             detail_keyboard = [
                 [InlineKeyboardButton("🚫 Добавить в бан", callback_data=f"ban_{hero}")],
                 [InlineKeyboardButton("← Назад к списку", callback_data="back_to_list")]
@@ -280,7 +279,6 @@ class TelegramBot:
 
         elif query.data.startswith("ban_"):
             hero = query.data.replace("ban_", "")
-            # Добавляем героя в баны пользователя
             new_len = self.redis_helper.add_character_to_bans_list(user_id, hero)
             await query.answer(text=f"Добавлен в баны: {hero} (всего: {new_len})", show_alert=False)
 
@@ -317,7 +315,7 @@ class TelegramBot:
             await query.edit_message_reply_markup(reply_markup=keyboard)
 
         elif query.data == "close_ban":
-            await query.edit_message_text("Меню банов закрыто")
+            await query.edit_message_text("Меню банов закрыто. Вводите команду соперников через запятую или пробел")
 
 
 def main():
