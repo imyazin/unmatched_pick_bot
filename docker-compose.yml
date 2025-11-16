@@ -9,7 +9,8 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     networks:
       - app-network
 
@@ -17,14 +18,24 @@ services:
     image: redis:7-alpine
     container_name: redis
     restart: unless-stopped
-    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
-    ports:
-      - "127.0.0.1:6379:6379"
+    command: |
+      redis-server
+      --bind 0.0.0.0
+      --protected-mode yes
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --dir /data
+      --dbfilename dump.rdb
     volumes:
-      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 networks:
   app-network:
