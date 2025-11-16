@@ -19,10 +19,10 @@ services:
     restart: unless-stopped
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     ports:
-      - "127.0.0.1:6379:6379"  # 🔒 Only bind to localhost
+      - "127.0.0.1:6379:6379"
     volumes:
       - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
-      - redis-data:/data  # 💾 Persist data
+      - redis-data:/data
     networks:
       - app-network
 
